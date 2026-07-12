@@ -14,7 +14,7 @@ from .archetypes import generate_archetypes
 def get_tournament_files(base_path='../MTG_decklistcache/Tournaments', lookback_days=365, fmt='modern'):
     """
     Find all modern tournament files from the last lookback_days.
-    
+
     Parameters:
     -----------
     base_path : str
@@ -23,48 +23,29 @@ def get_tournament_files(base_path='../MTG_decklistcache/Tournaments', lookback_
         Number of days to look back
     fmt : str
         Tournament format
-        
+
     Returns:
     --------
     list
         List of Path objects for matching tournament files
     """
-    cutoff_date = datetime.now() - timedelta(days=lookback_days)
-    
-    # Get all possible year/month/day combinations from cutoff to now
-    date_range = []
-    current_date = cutoff_date
-    while current_date <= datetime.now():
-        date_range.append(current_date)
-        current_date += timedelta(days=1)
-    
-    # Create patterns for each date
-    # TODO Remove pre-modern and premodern from modern
-    #
-    patterns = [
-        # Melee pattern
-        #
-        f"*/{date.year}/{date.month:02d}/{date.day:02d}/*-{fmt}*.json"
-        for date in date_range
-    ] + [
-        # MTGO pattern
-        #
-        f"*/{date.year}/{date.month:02d}/{date.day:02d}/{fmt}*.json"
-        for date in date_range
-    ]
-    
-    # Find all matching files
-    matching_files = []
     base_path = Path(base_path)
-    for pattern in patterns:
-        matching_files.extend(base_path.glob(pattern))
+
+    # Flat layout (e.g. our research-desk feeds: one file per event, no year/month/day
+    # nesting) -- matched by a plain recursive glob on the format substring. This is a
+    # strict superset of the nested MTGODecklistCache/Melee layout below (rglob also finds
+    # files under nested date dirs), so it's safe as the sole match path; per-day lookback
+    # pre-filtering that the nested glob used to provide is instead applied later, on the
+    # 'Date' column, by load_data(lookback_days=...).
+    matching_files = list(base_path.rglob(f'*{fmt}*.json'))
 
     if not matching_files:
         raise ValueError('No valid file paths were found.')
-    
+
     return matching_files
 
-def process_mtg_data(lookback_days=182, fmt='Modern'):
+def process_mtg_data(lookback_days=182, fmt='Modern', tournament_path='../MTG_decklistcache/Tournaments/',
+                      atomic_cards_path='../AtomicCards.json'):
     """Process MTG tournament data and save results for dashboard consumption."""
 
     print(f'Processing {fmt} tournament files')
@@ -74,9 +55,9 @@ def process_mtg_data(lookback_days=182, fmt='Modern'):
     #
     df = pd.DataFrame()
     res_df = pd.DataFrame()
-    
+
     # Process tournament files
-    tournament_path = Path('../MTG_decklistcache/Tournaments/')
+    tournament_path = Path(tournament_path)
     tournament_files = get_tournament_files(tournament_path, lookback_days, fmt.lower())
 
     if len(tournament_files) < 10:
@@ -110,12 +91,17 @@ def process_mtg_data(lookback_days=182, fmt='Modern'):
 
                     round_df[['gW', 'gL', 'gD']] = round_df['Result'].str.split('-', expand=True).astype(int)
 
-                    round_df['Date'] = f'{path.parent.parent.parent.name}-{path.parent.parent.name}-{path.parent.name}'
+                    # Real tournament date, not derived from a nested year/month/day path
+                    # (our research-desk feeds are flat files with the date in the JSON).
+                    round_df['Date'] = data['Tournament']['Date']
                     round_df['Tournament'] = path.name
 
+                    # Match-level result ("1-0-0"/"0-1-0"/"0-0-1", gW never > 1) rather than
+                    # MTG's best-of-3 game score (gW==2). Exact match is correct here since
+                    # our feeds never emit gW>1.
                     res_df = pd.concat([
-                        res_df, 
-                        round_df[round_df['gW'] == 2][
+                        res_df,
+                        round_df[round_df['gW'] == 1][
                             ['Date','Tournament','Player1','Player2']
                         ]
                     ], ignore_index=True)
@@ -189,8 +175,10 @@ def process_mtg_data(lookback_days=182, fmt='Modern'):
                 deck_df['Invalid_WR'] = True
 
             
-            # Set date from path if missing
-            deck_df['Date'] = f'{path.parent.parent.parent.name}-{path.parent.parent.name}-{path.parent.name}'
+            # Set date from path only if the deck itself doesn't already carry one (our
+            # feeds' Decks[] entries always have a real per-deck Date -- don't clobber it).
+            if 'Date' not in deck_df.columns:
+                deck_df['Date'] = data['Tournament']['Date']
             limited_cols = [
                 c for c in ['Deck', 'Player', 'Wins', 'Losses', 'Date', 'Tournament', 'Invalid_WR'] if c in deck_df.columns
             ]
@@ -214,7 +202,7 @@ def process_mtg_data(lookback_days=182, fmt='Modern'):
 
     # Load card data
     #
-    with open('../AtomicCards.json', 'r') as f:
+    with open(atomic_cards_path, 'r') as f:
         j = json.load(f)['data']
 
     # Oracle Id look up for card hovering.
@@ -312,6 +300,13 @@ def process_mtg_data(lookback_days=182, fmt='Modern'):
     
     with open(f'processed_data/deck_data.json', 'w') as f:
         json.dump(output_data, f)
+
+    # Guard against a silent-empty matchup matrix: a schema mismatch in the gW parsing
+    # above (e.g. a match-result encoding this format doesn't use) produces an empty
+    # res_df with no exception, which then silently yields an all-NaN matchup matrix.
+    if res_df.empty:
+        raise ValueError('res_df is empty -- no matches parsed as wins; check the Result '
+                          'encoding/gW parsing above against this format\'s Rounds schema.')
 
     with open(f'processed_data/results_data.json', 'w') as f:
         json.dump(res_df.to_dict('records'), f)

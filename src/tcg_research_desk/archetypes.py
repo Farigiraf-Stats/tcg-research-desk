@@ -161,10 +161,12 @@ def generate_archetypes(X, cards_data, vocabulary, n_cards=4, remove_pct=1):
             cluster_means = np.array(cluster_decks.mean(axis=0)).flatten()
             
 
-            # Apply land penalty if needed
+            # Apply a ubiquity penalty for near-every-deck-runs-these cards (MTG: basic
+            # Lands; Pokemon: basic/special Energy) so they don't dominate a cluster's
+            # "representative cards".
             land_penalty = np.array(
                 [
-                    0.5 if 'Land' in cards_data.get(
+                    0.5 if 'Energy' in cards_data.get(
                         vocabulary_inv.get(idx).replace('_SB',''),[{'types':[]}]
                     )[0]['types'] else 1.0 for idx in range(X.shape[1])
                 ]
